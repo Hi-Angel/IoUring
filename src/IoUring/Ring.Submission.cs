@@ -463,7 +463,7 @@ namespace IoUring
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns><code>false</code> if the submission queue is full. <code>true</code> otherwise.</returns>
         public bool TryPrepareTimeout(timespec *ts, uint count = 1, TimeoutOptions timeoutOptions = TimeoutOptions.Relative, ulong userData = 0,
-            SubmissionOption options = SubmissionOption.None) 
+            SubmissionOption options = SubmissionOption.None)
             => TryPrepareReadWrite(IORING_OP_TIMEOUT, -1, ts, 1, count, (int) timeoutOptions, userData, options);
 
         /// <summary>
@@ -523,7 +523,7 @@ namespace IoUring
         /// <param name="userData">User data that will be returned with the respective <see cref="Completion"/></param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns><code>false</code> if the submission queue is full. <code>true</code> otherwise.</returns>
-        public bool TryPrepareAccept(int fd, sockaddr *addr, socklen_t *addrLen, int flags, ulong userData = 0, SubmissionOption options = SubmissionOption.None) 
+        public bool TryPrepareAccept(int fd, sockaddr *addr, socklen_t *addrLen, int flags, ulong userData = 0, SubmissionOption options = SubmissionOption.None)
             => TryPrepareReadWrite(IORING_OP_ACCEPT, fd, addr, 0, (long) addrLen, flags, userData, options);
 
         /// <summary>
@@ -613,7 +613,7 @@ namespace IoUring
         /// <param name="userData">User data that will be returned with the respective <see cref="Completion"/></param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns><code>false</code> if the submission queue is full. <code>true</code> otherwise.</returns>
-        public bool TryPrepareLinkTimeout(timespec* ts, TimeoutOptions timeoutOptions = TimeoutOptions.Relative, ulong userData = 0, SubmissionOption options = SubmissionOption.None) 
+        public bool TryPrepareLinkTimeout(timespec* ts, TimeoutOptions timeoutOptions = TimeoutOptions.Relative, ulong userData = 0, SubmissionOption options = SubmissionOption.None)
             => TryPrepareReadWrite(IORING_OP_LINK_TIMEOUT, -1, ts, 1, 0, (int) timeoutOptions, userData, options);
 
         // internal for testing

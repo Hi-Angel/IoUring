@@ -25,6 +25,11 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <Compile Include="..\IoUring.Shared\*.cs" Link=".\*.cs" />
+        <Compile Include="..\IoUring.Shared\Internal\*.cs" Link=".\Internal\*.cs" />
+    </ItemGroup>
+
+    <ItemGroup>
       <PackageReference Include="System.IO.Pipelines" Version="4.7.0" />
       <PackageReference Include="Tmds.LibC" Version="0.4.0" />
     </ItemGroup>

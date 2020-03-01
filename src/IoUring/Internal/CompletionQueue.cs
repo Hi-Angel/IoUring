@@ -78,7 +78,7 @@ namespace IoUring.Internal
         /// </summary>
         public uint Entries => _ringEntries;
 
-        public bool TryRead(int ringFd, out Completion result) 
+        public bool TryRead(int ringFd, out Completion result)
             => TryRead(ringFd, out result, true);
 
         public Completion Read(int ringFd)

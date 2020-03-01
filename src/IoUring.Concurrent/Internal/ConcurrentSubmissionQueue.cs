@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -8,7 +10,7 @@ using static IoUring.Internal.ThrowHelper;
 
 namespace IoUring.Internal
 {
-    internal unsafe class SubmissionQueue
+    internal unsafe class ConcurrentSubmissionQueue
     {
         /// <summary>
         /// Incremented by the kernel to let the application know, another element was consumed.
@@ -68,7 +70,17 @@ namespace IoUring.Internal
         /// </summary>
         private readonly bool _sqPolled;
 
-        private SubmissionQueue(uint* head, uint* tail, uint ringMask, uint ringEntries, uint* flags, uint* dropped, uint* array, io_uring_sqe* sqes, bool sqPolled)
+        /// <summary>
+        /// Whether the kernel is polling I/O
+        /// </summary>
+        private readonly bool _ioPolled;
+
+        private AsyncOperationPool _pool;
+
+        private ConcurrentDictionary<ulong, AsyncOperation> _asyncOperations;
+        private object Gate => this;
+
+        private ConcurrentSubmissionQueue(uint* head, uint* tail, uint ringMask, uint ringEntries, uint* flags, uint* dropped, uint* array, io_uring_sqe* sqes, bool sqPolled, bool ioPolled, AsyncOperationPool pool, ConcurrentDictionary<ulong, AsyncOperation> asyncOperations)
         {
             _head = head;
             _tail = tail;
@@ -81,10 +93,14 @@ namespace IoUring.Internal
             _tailInternal = 0;
             _headInternal = 0;
             _sqPolled = sqPolled;
+            _ioPolled = ioPolled;
+            _asyncOperations = asyncOperations;
+            pool.Gate = Gate;
+            _pool = pool;
         }
 
-        public static SubmissionQueue CreateSubmissionQueue(void* ringBase, io_sqring_offsets* offsets, io_uring_sqe* elements, bool sqPolled)
-            => new SubmissionQueue(
+        public static ConcurrentSubmissionQueue CreateSubmissionQueue(void* ringBase, io_sqring_offsets* offsets, io_uring_sqe* elements, bool sqPolled, bool ioPolled, AsyncOperationPool pool, ConcurrentDictionary<ulong, AsyncOperation> asyncOperations)
+            => new ConcurrentSubmissionQueue(
                 head: Add<uint>(ringBase, offsets->head),
                 tail: Add<uint>(ringBase, offsets->tail),
                 ringMask: *Add<uint>(ringBase, offsets->ring_mask),
@@ -93,7 +109,10 @@ namespace IoUring.Internal
                 dropped: Add<uint>(ringBase, offsets->dropped),
                 array: Add<uint>(ringBase, offsets->array),
                 sqes: elements,
-                sqPolled: sqPolled
+                sqPolled: sqPolled,
+                ioPolled: ioPolled,
+                asyncOperations: asyncOperations,
+                pool: pool
             );
 
         /// <summary>
@@ -120,28 +139,12 @@ namespace IoUring.Internal
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
-                uint head = _sqPolled ? Volatile.Read(ref *_head) : _headInternal;
-                return unchecked(_tailInternal - head);
+                lock (Gate)
+                {
+                    uint head = _sqPolled ? *_head : _headInternal;
+                    return unchecked(_tailInternal - head);
+                }
             }
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private io_uring_sqe* InternalNextSqe(uint head)
-        {
-            uint tailInternal = _tailInternal;
-            uint next = unchecked(tailInternal + 1);
-
-            if (next - head > _ringEntries)
-            {
-                return (io_uring_sqe*) NULL;
-            }
-
-            var sqe = &_sqes[tailInternal & _ringMask];
-            _tailInternal = next;
-
-            // Handout cleaned sqe
-            Unsafe.InitBlockUnaligned(sqe, 0x00, (uint) sizeof(io_uring_sqe));
-            return sqe;
         }
 
         /// <summary>
@@ -149,14 +152,33 @@ namespace IoUring.Internal
         /// If the Submission Queue is full, a null-pointer is returned.
         /// </summary>
         /// <returns>The next Submission Queue Entry to be written to or null if the Queue is full</returns>
-        public io_uring_sqe* NextSubmissionQueueEntry()
+        public bool SubmitNextEntry(io_uring_sqe* sqeData, Action<object, int> callback, object state, out ulong userData)
         {
-            if (_sqPolled)
+            lock (Gate)
             {
-                return InternalNextSqe(Volatile.Read(ref *_head));
+                uint tailInternal = _tailInternal;
+                uint next = unchecked(tailInternal + 1);
+                uint head = _sqPolled ? *_head : _headInternal;
+                userData = CalculateUserData(sqeData->fd, tailInternal);
+
+                if (unchecked(next - head) > _ringEntries)
+                {
+                    return false;
+                }
+
+                var sqe = &_sqes[tailInternal & _ringMask];
+                _tailInternal = next;
+
+                Unsafe.CopyBlockUnaligned(sqe, sqeData, (uint) sizeof(io_uring_sqe));
+                sqe->user_data = userData;
+
+                var op = _pool.Rent();
+                op.Callback = callback;
+                op.State = state;
+                _asyncOperations[userData] = op;
             }
 
-            return InternalNextSqe(_headInternal);
+            return true;
         }
 
         /// <summary>
@@ -167,30 +189,32 @@ namespace IoUring.Internal
         /// This may include Submission Queue Entries previously ignored by the kernel.</returns>
         private uint Notify()
         {
-            uint tail = *_tail;
-            uint tailInternal = _tailInternal;
-            uint headInternal = _headInternal;
-            if (headInternal == tailInternal)
+            lock (Gate)
             {
+                uint tail = *_tail;
+                uint tailInternal = _tailInternal;
+                uint headInternal = _headInternal;
+                if (headInternal == tailInternal)
+                {
+                    return tail - *_head;
+                }
+
+                uint mask = _ringMask;
+                uint* array = _array;
+                uint toSubmit = unchecked(tailInternal - headInternal);
+                while (toSubmit-- != 0)
+                {
+                    array[tail & mask] = headInternal & mask;
+                    tail = unchecked(tail + 1);
+                    headInternal = unchecked(headInternal + 1);
+                }
+
+                _headInternal = headInternal;
+
+                *_tail = tail;
+
                 return tail - *_head;
             }
-
-            uint mask = _ringMask;
-            uint* array = _array;
-            uint toSubmit = unchecked(tailInternal - headInternal);
-            while (toSubmit-- != 0)
-            {
-                array[tail & mask] = headInternal & mask;
-                tail = unchecked(tail + 1);
-                headInternal = unchecked(headInternal + 1);
-            }
-
-            _headInternal = headInternal;
-
-            // write barrier to ensure all manipulations above are visible to the kernel once the tail-bump is observed
-            Volatile.Write(ref *_tail, tail);
-
-            return tail - *_head;
         }
 
         private bool ShouldEnter(out uint enterFlags)
@@ -225,7 +249,8 @@ namespace IoUring.Internal
                 return SubmitResult.SubmittedSuccessfully;
             }
 
-            if (minComplete > 0) enterFlags |= IORING_ENTER_GETEVENTS; // required for minComplete to take effect
+            // For minComplete to take effect or if the kernel is polling for I/O, we must set IORING_ENTER_GETEVENTS
+            if (minComplete > 0 || _ioPolled) enterFlags |= IORING_ENTER_GETEVENTS;
 
             int res;
             int err = default;
@@ -250,6 +275,14 @@ namespace IoUring.Internal
             return (operationsSubmitted = (uint) res) >= toSubmit ?
                 SubmitResult.SubmittedSuccessfully :
                 SubmitResult.SubmittedPartially;
+        }
+
+        private static ulong CalculateUserData(int fd, uint tail)
+        {
+            ulong lFd = unchecked((ulong)fd);
+            ulong lTail = tail;
+
+            return (lFd << 32) | lTail;
         }
     }
 }
