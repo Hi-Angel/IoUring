@@ -1,13 +1,15 @@
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Tmds.Linux;
 using static Tmds.Linux.LibC;
 using static IoUring.Internal.ThrowHelper;
 
 namespace IoUring.Internal
 {
-    internal unsafe class OneShotEvent : IDisposable
+    internal sealed unsafe class UnblockHandle : IDisposable
     {
         private readonly ConcurrentRing _ring;
         private int _eventfd;
@@ -15,7 +17,7 @@ namespace IoUring.Internal
         private GCHandle _eventfdIoVecHandle;
         private iovec* _eventfdIoVec;
 
-        public OneShotEvent(ConcurrentRing ring)
+        public UnblockHandle(ConcurrentRing ring)
         {
             _ring = ring;
 
@@ -37,19 +39,21 @@ namespace IoUring.Internal
             _eventfdIoVec = (iovec*) _eventfdIoVecHandle.AddrOfPinnedObject();
         }
 
-        public void Read()
+        public void Register()
         {
-            if (_eventfd == 0) throw new ObjectDisposedException(nameof(OneShotEvent));
+            var eventfd = Volatile.Read(ref _eventfd);
+            if (eventfd == 0) return; // race with dispose -> ignore
 
-            _ring.SubmitReadWrite(IORING_OP_READV, _eventfd, _eventfdIoVec, 1, default, 0, (state, res) =>
+            _ring.SubmitReadWrite(IORING_OP_READV, eventfd, _eventfdIoVec, 1, default, 0, (state, res) =>
             {
-                if (res == sizeof(long))
+                Debug.Assert(state is UnblockHandle);
+                if (res == sizeof(long) || res == -EINTR)
                 {
-                    ((OneShotEvent)state).Dispose();
+                    ((UnblockHandle)state!).Register();
                 }
-                else if (res == -EINTR)
+                else if (res == -EBADFD && Volatile.Read(ref  ((UnblockHandle)state!)._eventfd) == 0)
                 {
-                    ((OneShotEvent)state).Read();
+                    // interrupted by dispose -> ignore
                 }
                 else
                 {
@@ -58,30 +62,37 @@ namespace IoUring.Internal
             }, this, SubmissionOption.None);
         }
 
-        public void Write()
+        public void Unblock()
         {
-            if (_eventfd == 0) throw new ObjectDisposedException(nameof(OneShotEvent));
+            var eventfd = Volatile.Read(ref _eventfd);
+            if (eventfd == 0) return; // race with dispose -> ignore
 
             byte* val = stackalloc byte[sizeof(ulong)];
             Unsafe.WriteUnaligned(val, 1UL);
             int rv;
             do
             {
-                rv = (int) write(_eventfd, val, sizeof(ulong));
+                rv = (int) write(eventfd, val, sizeof(ulong));
             } while (rv == -1 && errno == EINTR);
 
-            if (rv == -1) ThrowErrnoException(errno);
+            if (rv == -1)
+            {
+                if (errno == EBADFD && Volatile.Read(ref _eventfd) == 0) return; // race with dispose -> ignore
+                ThrowErrnoException(errno);
+            }
+
+            Debug.Assert(rv == 8);
         }
 
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref _eventfd, 0) == 0)
+                return; // Already disposed
+
             close(_eventfd);
-            _eventfd = 0;
             _eventfdIoVec = (iovec*) 0;
-            if (_eventfdIoVecHandle.IsAllocated)
-                _eventfdIoVecHandle.Free();
-            if (_eventfdBytes.IsAllocated)
-                _eventfdBytes.Free();
+            _eventfdIoVecHandle.Free();
+            _eventfdBytes.Free();
         }
     }
 }

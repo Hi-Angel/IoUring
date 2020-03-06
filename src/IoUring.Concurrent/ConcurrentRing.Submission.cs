@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Runtime.CompilerServices;
 using Tmds.Linux;
 using IoUring.Internal;
@@ -11,6 +12,7 @@ namespace IoUring
         private readonly ConcurrentSubmissionQueue _sq;
         private readonly UnmapHandle _sqHandle;
         private readonly UnmapHandle _sqeHandle;
+        private readonly AsyncOperationPool _operationPool;
 
         /// <summary>
         /// Submits a NOP to the kernel for execution.
@@ -19,7 +21,7 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitNop(Action<object, int> callback, object state, SubmissionOption options = SubmissionOption.None)
+        public ulong SubmitNop(Action<object?, int> callback, object? state, SubmissionOption options = SubmissionOption.None)
         {
             io_uring_sqe sqe = default;
 
@@ -39,7 +41,7 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitReadV(int fd, iovec* iov, int count, Action<object, int> callback, object state, SubmissionOption options = SubmissionOption.None)
+        public ulong SubmitReadV(int fd, iovec* iov, int count, Action<object?, int> callback, object? state, SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWrite(IORING_OP_READV, fd, iov, count, default, 0, callback, state, options);
         }
@@ -56,7 +58,7 @@ namespace IoUring
         /// <param name="flags">Flags for the I/O (as per preadv2)</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitReadV(Action<object, int> callback, object state,
+        public ulong SubmitReadV(Action<object?, int> callback, object? state,
             int fd, iovec* iov, int count, off_t offset, int flags, SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWrite(IORING_OP_READV, fd, iov, count, offset, flags, callback, state, options);
@@ -72,7 +74,7 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitWriteV(int fd, iovec* iov, int count, Action<object, int> callback, object state,
+        public ulong SubmitWriteV(int fd, iovec* iov, int count, Action<object?, int> callback, object? state,
             SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWrite(IORING_OP_WRITEV, fd, iov, count, default, 0, callback, state, options);
@@ -90,8 +92,8 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitWriteV(int fd, iovec* iov, int count, off_t offset, int flags, Action<object, int> callback,
-            object state, SubmissionOption options = SubmissionOption.None)
+        public ulong SubmitWriteV(int fd, iovec* iov, int count, off_t offset, int flags, Action<object?, int> callback,
+            object? state, SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWrite(IORING_OP_WRITEV, fd, iov, count, offset, flags, callback, state, options);
         }
@@ -104,7 +106,7 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitFsync(int fd, Action<object, int> callback, object state,
+        public ulong SubmitFsync(int fd, Action<object?, int> callback, object? state,
             SubmissionOption options = SubmissionOption.None)
         {
             io_uring_sqe sqe = default;
@@ -126,7 +128,7 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitFsync(int fd, FsyncOption fsyncOptions, Action<object, int> callback, object state,
+        public ulong SubmitFsync(int fd, FsyncOption fsyncOptions, Action<object?, int> callback, object? state,
             SubmissionOption options = SubmissionOption.None)
         {
             io_uring_sqe sqe = default;
@@ -150,8 +152,8 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitReadFixed(int fd, void* buf, size_t count, int index, Action<object, int> callback,
-            object state, SubmissionOption options = SubmissionOption.None)
+        public ulong SubmitReadFixed(int fd, void* buf, size_t count, int index, Action<object?, int> callback,
+            object? state, SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWriteFixed(IORING_OP_READ_FIXED, fd, buf, count, index, default, callback, state, options);
         }
@@ -169,7 +171,7 @@ namespace IoUring
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
         public ulong SubmitReadFixed(int fd, void* buf, size_t count, int index, off_t offset,
-            Action<object, int> callback, object state, SubmissionOption options = SubmissionOption.None)
+            Action<object?, int> callback, object? state, SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWriteFixed(IORING_OP_READ_FIXED, fd, buf, count, index, offset, callback, state, options);
         }
@@ -185,8 +187,8 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitWriteFixed(int fd, void* buf, size_t count, int index, Action<object, int> callback,
-            object state, SubmissionOption options = SubmissionOption.None)
+        public ulong SubmitWriteFixed(int fd, void* buf, size_t count, int index, Action<object?, int> callback,
+            object? state, SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWriteFixed(IORING_OP_WRITE_FIXED, fd, buf, count, index, default, callback, state, options);
         }
@@ -204,7 +206,7 @@ namespace IoUring
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
         public ulong SubmitWriteFixed(int fd, void* buf, size_t count, int index, off_t offset,
-            Action<object, int> callback, object state, SubmissionOption options = SubmissionOption.None)
+            Action<object?, int> callback, object? state, SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWriteFixed(IORING_OP_WRITE_FIXED, fd, buf, count, index, offset, callback, state, options);
         }
@@ -218,7 +220,7 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitPollAdd(int fd, ushort pollEvents, Action<object, int> callback, object state,
+        public ulong SubmitPollAdd(int fd, ushort pollEvents, Action<object?, int> callback, object? state,
             SubmissionOption options = SubmissionOption.None)
         {
             io_uring_sqe sqe = default;
@@ -238,7 +240,7 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitPollRemove(Action<object, int> callback, object state, SubmissionOption options = SubmissionOption.None)
+        public ulong SubmitPollRemove(Action<object?, int> callback, object? state, SubmissionOption options = SubmissionOption.None)
         {
             io_uring_sqe sqe = default;
 
@@ -259,8 +261,8 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitSyncFileRange(int fd, off_t offset, off_t count, uint flags, Action<object, int> callback,
-            object state, SubmissionOption options = SubmissionOption.None)
+        public ulong SubmitSyncFileRange(int fd, off_t offset, off_t count, uint flags, Action<object?, int> callback,
+            object? state, SubmissionOption options = SubmissionOption.None)
         {
             io_uring_sqe sqe = default;
 
@@ -287,7 +289,7 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitSendMsg(int fd, msghdr* msg, int flags, Action<object, int> callback, object state,
+        public ulong SubmitSendMsg(int fd, msghdr* msg, int flags, Action<object?, int> callback, object? state,
             SubmissionOption options = SubmissionOption.None)
         {
             return SubmitSendRecvMsg(IORING_OP_SENDMSG, fd, msg, flags, callback, state, options);
@@ -303,7 +305,7 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitRecvMsg(int fd, msghdr* msg, int flags, Action<object, int> callback, object state,
+        public ulong SubmitRecvMsg(int fd, msghdr* msg, int flags, Action<object?, int> callback, object? state,
             SubmissionOption options = SubmissionOption.None)
         {
             return SubmitSendRecvMsg(IORING_OP_RECVMSG, fd, msg, flags, callback, state, options);
@@ -317,7 +319,7 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitTimeout(timespec* ts, Action<object, int> callback, object state,
+        public ulong SubmitTimeout(timespec* ts, Action<object?, int> callback, object? state,
             SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWrite(IORING_OP_TIMEOUT, -1, ts, 1, 1, (int) TimeoutOptions.Relative, callback, state, options);
@@ -334,7 +336,7 @@ namespace IoUring
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
         public ulong SubmitTimeout(timespec* ts, uint count, TimeoutOptions timeoutOptions,
-            Action<object, int> callback, object state, SubmissionOption options = SubmissionOption.None)
+            Action<object?, int> callback, object? state, SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWrite(IORING_OP_TIMEOUT, -1, ts, 1, count, (int) timeoutOptions, callback, state, options);
         }
@@ -347,7 +349,7 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitTimeoutRemove(ulong timeoutRef, Action<object, int> callback, object state,
+        public ulong SubmitTimeoutRemove(ulong timeoutRef, Action<object?, int> callback, object? state,
             SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWrite(IORING_OP_TIMEOUT_REMOVE, -1, (void*) timeoutRef, 0, 0, 0, callback, state, options);
@@ -364,8 +366,8 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitAccept(int fd, sockaddr* addr, socklen_t* addrLen, int flags, Action<object, int> callback,
-            object state, SubmissionOption options = SubmissionOption.None)
+        public ulong SubmitAccept(int fd, sockaddr* addr, socklen_t* addrLen, int flags, Action<object?, int> callback,
+            object? state, SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWrite(IORING_OP_ACCEPT, fd, addr, 0, (long) addrLen, flags, callback, state, options);
         }
@@ -378,7 +380,7 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitCancel(ulong operationRef, Action<object, int> callback, object state,
+        public ulong SubmitCancel(ulong operationRef, Action<object?, int> callback, object? state,
             SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWrite(IORING_OP_ASYNC_CANCEL, -1, (void*) operationRef, 0, 0, 0, callback, state, options);
@@ -395,8 +397,8 @@ namespace IoUring
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns><code>false</code> if the submission queue is full. <code>true</code> otherwise.</returns>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitConnect(int fd, sockaddr* addr, socklen_t addrLen, Action<object, int> callback,
-            object state, SubmissionOption options = SubmissionOption.None)
+        public ulong SubmitConnect(int fd, sockaddr* addr, socklen_t addrLen, Action<object?, int> callback,
+            object? state, SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWrite(IORING_OP_CONNECT, fd, addr, 0, (uint) addrLen, 0, callback, state, options);
         }
@@ -409,7 +411,7 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitLinkTimeout(timespec* ts, Action<object, int> callback, object state,
+        public ulong SubmitLinkTimeout(timespec* ts, Action<object?, int> callback, object? state,
             SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWrite(IORING_OP_LINK_TIMEOUT, -1, ts, 1, 0, (int) TimeoutOptions.Relative, callback, state, options);
@@ -424,15 +426,15 @@ namespace IoUring
         /// <param name="state">State to be passed to the callback</param>
         /// <param name="options">Options for the handling of the prepared Submission Queue Entry</param>
         /// <returns>A reference to the submitted operation</returns>
-        public ulong SubmitLinkTimeout(timespec* ts, TimeoutOptions timeoutOptions, Action<object, int> callback,
-            object state, SubmissionOption options = SubmissionOption.None)
+        public ulong SubmitLinkTimeout(timespec* ts, TimeoutOptions timeoutOptions, Action<object?, int> callback,
+            object? state, SubmissionOption options = SubmissionOption.None)
         {
             return SubmitReadWrite(IORING_OP_LINK_TIMEOUT, -1, ts, 1, 0, (int) timeoutOptions, callback, state, options);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal ulong SubmitReadWrite(byte op, int fd, void* iov, int count, off_t offset, int flags,
-            Action<object, int> callback, object state, SubmissionOption options)
+            Action<object?, int> callback, object? state, SubmissionOption options)
         {
             io_uring_sqe sqe = default;
 
@@ -452,7 +454,7 @@ namespace IoUring
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private ulong SubmitReadWriteFixed(byte op, int fd, void* buf, size_t count, int index, off_t offset,
-            Action<object, int> callback, object state, SubmissionOption options)
+            Action<object?, int> callback, object? state, SubmissionOption options)
         {
             io_uring_sqe sqe = default;
 
@@ -472,7 +474,7 @@ namespace IoUring
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private ulong SubmitSendRecvMsg(byte op, int fd, msghdr* msg, int flags,
-            Action<object, int> callback, object state, SubmissionOption options)
+            Action<object?, int> callback, object? state, SubmissionOption options)
         {
             io_uring_sqe sqe;
 
@@ -489,35 +491,80 @@ namespace IoUring
             return SubmitNextEntry(&sqe, callback, state);
         }
 
-        /// <summary>
-        /// Notifies the kernel of the availability of new Submission Queue Entries and waits for a given number of completions to occur.
-        /// This typically requires a syscall and should be deferred as long as possible.
-        /// </summary>
-        /// <param name="minComplete">The number of completed Submission Queue Entries required before returning</param>
-        /// <param name="operationsSubmitted">(out) The number of submitted Submission Queue Entries</param>
-        /// <returns>The result of the operation</returns>
-        /// <exception cref="ErrnoException">On negative result from syscall with errno other than EAGAIN, EBUSY and EINTR</exception>
-        public SubmitResult SubmitAndWait(uint minComplete, out uint operationsSubmitted)
-            => _sq.SubmitAndWait(_ringFd.DangerousGetHandle().ToInt32(), minComplete, out operationsSubmitted);
-
-        /// <summary>
-        /// Notifies the kernel of the availability of new Submission Queue Entries.
-        /// This typically requires a syscall and should be deferred as long as possible.
-        /// </summary>
-        /// <param name="operationsSubmitted">(out) The number of submitted Submission Queue Entries</param>
-        /// <returns>The result of the operation</returns>
-        /// <exception cref="ErrnoException">On negative result from syscall with errno other than EAGAIN, EBUSY and EINTR</exception>
-        public SubmitResult Submit(out uint operationsSubmitted)
-            => SubmitAndWait(0, out operationsSubmitted);
-
-        private ulong SubmitNextEntry(io_uring_sqe* sqe, Action<object, int> callback, object state)
+        private ulong SubmitNextEntry(io_uring_sqe* sqe, Action<object?, int> callback, object? state)
         {
-            if (!_sq.SubmitNextEntry(sqe, callback, state, out var userData))
+            AsyncOperation op = _operationPool.Rent();
+            op.Sqe = sqe;
+            op.Callback = callback;
+            op.State = state;
+
+            if (!_sq.SubmitNextEntry(op, out var userData))
             {
-                throw new NotImplementedException("Grow");
+                ThrowHelper.ThrowSubmissionQueueFullException(); // TODO: Grow instead
             }
 
             return userData;
+        }
+
+        public void SubmitMultiple(
+            Submission submission1, Action<object?, int> callback1, object? state1,
+            Submission submission2, Action<object?, int> callback2, object? state2,
+            Span<ulong> userData)
+        {
+            var op1 = _operationPool.Rent();
+            op1.Sqe = (io_uring_sqe*) (&submission1);
+            op1.Callback = callback1;
+            op1.State = state1;
+
+            var op2 = _operationPool.Rent();
+            op2.Sqe = (io_uring_sqe*) (&submission2);
+            op2.Callback = callback2;
+            op2.State = state2;
+
+            AsyncOperation[] ops = ArrayPool<AsyncOperation>.Shared.Rent(2);
+            ops[0] = op1;
+            ops[1] = op2;
+
+            if (!_sq.SubmitNextEntries(ops.AsSpan().Slice(0,2 ), userData))
+            {
+                ThrowHelper.ThrowSubmissionQueueFullException(); // TODO: Grow instead
+            }
+
+            ArrayPool<AsyncOperation>.Shared.Return(ops);
+        }
+
+        public void SubmitMultiple(
+            Submission submission1, Action<object?, int> callback1, object? state1,
+            Submission submission2, Action<object?, int> callback2, object? state2,
+            Submission submission3, Action<object?, int> callback3, object? state3,
+            Span<ulong> userData)
+        {
+            var op1 = _operationPool.Rent();
+            op1.Sqe = (io_uring_sqe*) (&submission1);
+            op1.Callback = callback1;
+            op1.State = state1;
+
+            var op2 = _operationPool.Rent();
+            op2.Sqe = (io_uring_sqe*) (&submission2);
+            op2.Callback = callback2;
+            op2.State = state2;
+
+            var op3 = _operationPool.Rent();
+            op3.Sqe = (io_uring_sqe*) (&submission3);
+            op3.Callback = callback3;
+            op3.State = state3;
+
+            AsyncOperation[] ops = ArrayPool<AsyncOperation>.Shared.Rent(3);
+            ops[0] = op1;
+            ops[1] = op2;
+            ops[2] = op3;
+
+            if (!_sq.SubmitNextEntries(ops.AsSpan().Slice(0,3 ), userData))
+            {
+                ThrowHelper.ThrowSubmissionQueueFullException(); // TODO: Grow instead
+            }
+
+            ArrayPool<AsyncOperation>.Shared.Return(ops);
         }
     }
 }

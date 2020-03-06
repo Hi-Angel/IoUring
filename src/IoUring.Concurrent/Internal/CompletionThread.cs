@@ -11,13 +11,13 @@ namespace IoUring.Internal
         private readonly ConcurrentRing _ring;
         private readonly Barrier _barrier;
         private readonly bool _isBoss;
-        private readonly OneShotEvent? _unblockEvent;
+        private readonly UnblockHandle? _unblockEvent;
         private readonly ConcurrentDictionary<ulong, AsyncOperation> _asyncOperations;
         private readonly bool _runContinuationsAsynchronously;
         private Thread? _thread;
         private volatile bool _isDisposed;
 
-        public CompletionThread(ConcurrentRing ring, Barrier barrier, bool isBoss, OneShotEvent? unblockEvent, ConcurrentDictionary<ulong, AsyncOperation> asyncOperations, bool runContinuationsAsynchronously)
+        public CompletionThread(ConcurrentRing ring, Barrier barrier, bool isBoss, UnblockHandle? unblockEvent, ConcurrentDictionary<ulong, AsyncOperation> asyncOperations, bool runContinuationsAsynchronously)
         {
             _ring = ring;
             _barrier = barrier;
@@ -58,14 +58,11 @@ namespace IoUring.Internal
         {
             try
             {
-                RunCompletions(_ring.Read());
+                _ring.Synchronize();
             }
             catch (ErrnoException)
             {
-                lock (_barrier)
-                {
-                    _barrier.Dispose();
-                }
+                _barrier.Dispose();
                 throw;
             }
         }
@@ -74,7 +71,6 @@ namespace IoUring.Internal
         {
             try
             {
-                // ReSharper disable once InconsistentlySynchronizedField - only Barrier.Dispose() is not thread safe.
                 _barrier.SignalAndWait();
             }
             catch (ObjectDisposedException)
@@ -99,25 +95,14 @@ namespace IoUring.Internal
             }
             else
             {
-                try
-                {
-                    operation.RunInline(result);
-                }
-                catch (Exception)
-                {
-                    /* swallow all errors */
-                }
-                finally
-                {
-                    operation.Return();
-                }
+                operation.RunInline(result);
             }
         }
 
         public void Dispose()
         {
             _isDisposed = true;
-            _unblockEvent?.Write();
+            _unblockEvent?.Unblock();
             _thread?.Join();
             _barrier.Dispose();
         }

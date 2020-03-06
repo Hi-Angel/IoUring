@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Threading;
 using Tmds.Linux;
 using static Tmds.Linux.LibC;
@@ -11,40 +12,40 @@ namespace IoUring.Internal
         /// <summary>
         /// Incremented by the application to let the kernel know, which Completion Queue Events were already consumed.
         /// </summary>
-        private readonly uint* _head;
+        internal readonly uint* _head;
 
         /// <summary>
         /// Incremented by the kernel to let the application know about another Completion Queue Event.
         /// </summary>
-        private readonly uint* _tail;
+        internal readonly uint* _tail;
 
         /// <summary>
         /// Mask to apply to potentially overflowing head counter to get a valid index within the ring.
         /// </summary>
-        private readonly uint _ringMask;
+        internal readonly uint _ringMask;
 
         /// <summary>
         /// Number of entries in the ring.
         /// </summary>
-        private readonly uint _ringEntries;
+        internal readonly uint _ringEntries;
 
         /// <summary>
         /// Incremented by the kernel on each overwritten Completion Queue Event.
         /// This is a sign, that the application is producing Submission Queue Events faster as it handles the corresponding Completion Queue Events.
         /// </summary>
-        private readonly uint* _overflow;
+        internal readonly uint* _overflow;
 
         /// <summary>
         /// Completion Queue Events filled by the kernel.
         /// </summary>
-        private readonly io_uring_cqe* _cqes;
+        internal readonly io_uring_cqe* _cqes;
 
         /// <summary>
         /// Whether the kernel polls for I/O
         /// </summary>
-        private readonly bool _ioPolled;
+        internal readonly bool _ioPolled;
 
-        private object Gate => this;
+        internal object Gate => this;
 
         private ConcurrentCompletionQueue(uint* head, uint* tail, uint ringMask, uint ringEntries, uint* overflow, io_uring_cqe* cqes, bool ioPolled)
         {
@@ -73,6 +74,18 @@ namespace IoUring.Internal
         /// </summary>
         public uint Entries => _ringEntries;
 
+        /// <summary>
+        /// Returns whether events are currently available to be read
+        /// </summary>
+        internal bool EventsAvailable
+        {
+            get
+            {
+                Debug.Assert(Monitor.IsEntered(Gate));
+                return *_head != *_tail;
+            }
+        }
+
         public bool TryRead(int ringFd, out Completion result)
         {
             lock (Gate)
@@ -89,16 +102,17 @@ namespace IoUring.Internal
                     eventsAvailable = head != Volatile.Read(ref *_tail);
                 }
 
-                uint overflow = *_overflow;
-                if (overflow > 0)
-                {
-                    ThrowOverflowException(overflow);
-                }
-
                 if (!eventsAvailable)
                 {
                     result = default;
                     return false;
+                }
+
+                // Check overflow now that we are sure there are events available... without events we assume no overflow happened
+                uint overflow = *_overflow;
+                if (overflow > 0)
+                {
+                    ThrowOverflowException(overflow);
                 }
 
                 var index = head & _ringMask;

@@ -1,33 +1,33 @@
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Threading;
+using Microsoft.Extensions.ObjectPool;
 
 namespace IoUring.Internal
 {
+    internal class AsyncOperationPoolingStrategy : IPooledObjectPolicy<AsyncOperation>
+    {
+        private readonly AsyncOperationPool _pool;
+
+        public AsyncOperationPoolingStrategy(AsyncOperationPool pool)
+        {
+            _pool = pool;
+        }
+
+        public AsyncOperation Create() => new AsyncOperation(_pool);
+
+        public bool Return(AsyncOperation obj) => true;
+    }
+
     internal sealed class AsyncOperationPool
     {
-        private readonly Queue<AsyncOperation> _queue = new Queue<AsyncOperation>();
+        private readonly ObjectPool<AsyncOperation> _pool;
 
-        public object? Gate { get; set; }
-
-        public AsyncOperation Rent()
+        public AsyncOperationPool()
         {
-            Debug.Assert(Gate != null);
-            Debug.Assert(Monitor.IsEntered(Gate));
-
-            if (_queue.TryDequeue(out var op)) return op;
-
-            return new AsyncOperation(this);
+            var poolingStrategy = new AsyncOperationPoolingStrategy(this);
+            _pool = new DefaultObjectPool<AsyncOperation>(poolingStrategy);
         }
 
-        public void Return(AsyncOperation op)
-        {
-            Debug.Assert(Gate != null);
+        public AsyncOperation Rent() => _pool.Get();
 
-            lock (Gate)
-            {
-                _queue.Enqueue(op);
-            }
-        }
+        public void Return(AsyncOperation op) => _pool.Return(op);
     }
 }

@@ -78,6 +78,8 @@ namespace IoUring.Internal
         /// </summary>
         public uint Entries => _ringEntries;
 
+        public uint Foo =>  Volatile.Read(ref *_tail) - Volatile.Read(ref *_head);
+
         public bool TryRead(int ringFd, out Completion result)
             => TryRead(ringFd, out result, true);
 

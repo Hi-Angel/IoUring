@@ -73,14 +73,19 @@ namespace IoUring.Internal
         /// <summary>
         /// Whether the kernel is polling I/O
         /// </summary>
-        private readonly bool _ioPolled;
+        internal bool IoPolled { get; }
 
-        private AsyncOperationPool _pool;
+        private readonly ConcurrentDictionary<ulong, AsyncOperation> _asyncOperations;
 
-        private ConcurrentDictionary<ulong, AsyncOperation> _asyncOperations;
-        private object Gate => this;
+        private readonly UnblockHandle _unblockHandle;
+        internal object Gate => this;
 
-        private ConcurrentSubmissionQueue(uint* head, uint* tail, uint ringMask, uint ringEntries, uint* flags, uint* dropped, uint* array, io_uring_sqe* sqes, bool sqPolled, bool ioPolled, AsyncOperationPool pool, ConcurrentDictionary<ulong, AsyncOperation> asyncOperations)
+        internal bool ShouldUnblock { get; set; }
+
+        private ConcurrentSubmissionQueue(
+            uint* head, uint* tail, uint ringMask, uint ringEntries, uint* flags, uint* dropped, uint* array, io_uring_sqe* sqes,
+            bool sqPolled, bool ioPolled, ConcurrentDictionary<ulong, AsyncOperation> asyncOperations,
+            UnblockHandle unblockHandle)
         {
             _head = head;
             _tail = tail;
@@ -93,26 +98,24 @@ namespace IoUring.Internal
             _tailInternal = 0;
             _headInternal = 0;
             _sqPolled = sqPolled;
-            _ioPolled = ioPolled;
+            IoPolled = ioPolled;
             _asyncOperations = asyncOperations;
-            pool.Gate = Gate;
-            _pool = pool;
+            _unblockHandle = unblockHandle;
         }
 
-        public static ConcurrentSubmissionQueue CreateSubmissionQueue(void* ringBase, io_sqring_offsets* offsets, io_uring_sqe* elements, bool sqPolled, bool ioPolled, AsyncOperationPool pool, ConcurrentDictionary<ulong, AsyncOperation> asyncOperations)
+        public static ConcurrentSubmissionQueue CreateSubmissionQueue(
+            void* ringBase, io_sqring_offsets* offsets, io_uring_sqe* elements,
+            bool sqPolled, bool ioPolled, ConcurrentDictionary<ulong, AsyncOperation> asyncOperations,
+            UnblockHandle unblockHandle)
             => new ConcurrentSubmissionQueue(
-                head: Add<uint>(ringBase, offsets->head),
-                tail: Add<uint>(ringBase, offsets->tail),
-                ringMask: *Add<uint>(ringBase, offsets->ring_mask),
-                ringEntries: *Add<uint>(ringBase, offsets->ring_entries),
-                flags: Add<uint>(ringBase, offsets->flags),
-                dropped: Add<uint>(ringBase, offsets->dropped),
-                array: Add<uint>(ringBase, offsets->array),
-                sqes: elements,
-                sqPolled: sqPolled,
-                ioPolled: ioPolled,
-                asyncOperations: asyncOperations,
-                pool: pool
+                Add<uint>(ringBase, offsets->head),
+                Add<uint>(ringBase, offsets->tail),
+                *Add<uint>(ringBase, offsets->ring_mask),
+                *Add<uint>(ringBase, offsets->ring_entries),
+                Add<uint>(ringBase, offsets->flags),
+                Add<uint>(ringBase, offsets->dropped),
+                Add<uint>(ringBase, offsets->array),
+                elements, sqPolled, ioPolled, asyncOperations, unblockHandle
             );
 
         /// <summary>
@@ -148,34 +151,91 @@ namespace IoUring.Internal
         }
 
         /// <summary>
-        /// Finds the next Submission Queue Entry to be written to. The entry will be initialized with zeroes.
-        /// If the Submission Queue is full, a null-pointer is returned.
+        /// Adds the provided async operation to the Submission Queue.
         /// </summary>
-        /// <returns>The next Submission Queue Entry to be written to or null if the Queue is full</returns>
-        public bool SubmitNextEntry(io_uring_sqe* sqeData, Action<object, int> callback, object state, out ulong userData)
+        /// <returns>Whether the operation could be added</returns>
+        public bool SubmitNextEntry(AsyncOperation op, out ulong userData)
         {
+            io_uring_sqe* sqeData = op.Sqe;
+            bool unblock;
+
             lock (Gate)
             {
                 uint tailInternal = _tailInternal;
-                uint next = unchecked(tailInternal + 1);
                 uint head = _sqPolled ? *_head : _headInternal;
+                uint next = unchecked(tailInternal + 1);
+                uint pendingItems = unchecked(next - head);
+
                 userData = CalculateUserData(sqeData->fd, tailInternal);
 
-                if (unchecked(next - head) > _ringEntries)
+                if (pendingItems > _ringEntries)
                 {
                     return false;
                 }
 
+                sqeData->user_data = userData;
                 var sqe = &_sqes[tailInternal & _ringMask];
-                _tailInternal = next;
 
                 Unsafe.CopyBlockUnaligned(sqe, sqeData, (uint) sizeof(io_uring_sqe));
-                sqe->user_data = userData;
 
-                var op = _pool.Rent();
-                op.Callback = callback;
-                op.State = state;
                 _asyncOperations[userData] = op;
+                _tailInternal = next;
+
+                unblock = ShouldUnblock;
+                if (unblock) ShouldUnblock = false;
+            }
+
+            if (unblock)
+            {
+                 _unblockHandle.Unblock();
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Adds the provided async operations to the Submission Queue.
+        /// </summary>
+        /// <returns>Whether the operations could be added</returns>
+        public bool SubmitNextEntries(ReadOnlySpan<AsyncOperation> ops, Span<ulong> userData)
+        {
+            Debug.Assert(ops.Length == userData.Length);
+            bool unblock;
+
+            lock (Gate)
+            {
+                uint tailInternal = _tailInternal;
+                uint head = _sqPolled ? *_head : _headInternal;
+
+                if (tailInternal + ops.Length - head > _ringEntries)
+                {
+                    return false;
+                }
+
+                for (int i = 0; i < ops.Length; i++)
+                {
+                    var op = ops[i];
+
+                    io_uring_sqe* sqeData = op.Sqe;
+                    var currentUserData =  CalculateUserData(sqeData->fd, tailInternal);
+                    userData[i] = currentUserData;
+                    sqeData->user_data = currentUserData;
+
+                    var sqe = &_sqes[tailInternal & _ringMask];
+                    Unsafe.CopyBlockUnaligned(sqe, sqeData, (uint) sizeof(io_uring_sqe));
+
+                    _asyncOperations[currentUserData] = op;
+                    tailInternal = unchecked(tailInternal + 1);
+                }
+
+                _tailInternal = tailInternal;
+                unblock = ShouldUnblock;
+                if (unblock) ShouldUnblock = false;
+            }
+
+            if (unblock)
+            {
+                _unblockHandle.Unblock();
             }
 
             return true;
@@ -187,7 +247,7 @@ namespace IoUring.Internal
         /// <returns>
         /// The number Submission Queue Entries that can be submitted.
         /// This may include Submission Queue Entries previously ignored by the kernel.</returns>
-        private uint Notify()
+        internal uint Notify()
         {
             lock (Gate)
             {
@@ -217,7 +277,7 @@ namespace IoUring.Internal
             }
         }
 
-        private bool ShouldEnter(out uint enterFlags)
+        internal bool ShouldEnter(out uint enterFlags)
         {
             enterFlags = 0;
             if (!_sqPolled) return true;
@@ -245,12 +305,20 @@ namespace IoUring.Internal
                 CheckNoSubmissionsDropped();
 
                 // Assume all Entries are already known to the kernel via Notify above
-                operationsSubmitted = toSubmit;
-                return SubmitResult.SubmittedSuccessfully;
+                goto SkipSyscall;
             }
 
             // For minComplete to take effect or if the kernel is polling for I/O, we must set IORING_ENTER_GETEVENTS
-            if (minComplete > 0 || _ioPolled) enterFlags |= IORING_ENTER_GETEVENTS;
+            if (minComplete > 0 || IoPolled)
+            {
+                enterFlags |= IORING_ENTER_GETEVENTS;
+            }
+            else if (toSubmit == 0)
+            {
+                // There are no submissions, we don't have to wait for completions and don't have to reap polled I/O completions
+                // --> We can skip the syscall and return directly.
+                goto SkipSyscall;
+            }
 
             int res;
             int err = default;
@@ -275,6 +343,10 @@ namespace IoUring.Internal
             return (operationsSubmitted = (uint) res) >= toSubmit ?
                 SubmitResult.SubmittedSuccessfully :
                 SubmitResult.SubmittedPartially;
+
+        SkipSyscall:
+            operationsSubmitted = toSubmit;
+            return SubmitResult.SubmittedSuccessfully;
         }
 
         private static ulong CalculateUserData(int fd, uint tail)

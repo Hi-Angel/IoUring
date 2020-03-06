@@ -53,8 +53,8 @@ namespace IoUring
         }
 
         private static ConcurrentSubmissionQueue MapSq(int ringFd, size_t sqSize, io_uring_params* p, bool sqPolled,
-            bool ioPolled, AsyncOperationPool pool, ConcurrentDictionary<ulong, AsyncOperation> asyncOperations,
-            out UnmapHandle sqHandle, out UnmapHandle sqeHandle)
+            bool ioPolled, ConcurrentDictionary<ulong, AsyncOperation> asyncOperations,
+            UnblockHandle unblockHandle, out UnmapHandle sqHandle, out UnmapHandle sqeHandle)
         {
             var ptr = mmap(NULL, sqSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ringFd, (long) IORING_OFF_SQ_RING);
             if (ptr == MAP_FAILED)
@@ -71,7 +71,7 @@ namespace IoUring
             }
             sqeHandle = new UnmapHandle(sqePtr, sqeSize);
 
-            return ConcurrentSubmissionQueue.CreateSubmissionQueue(ptr, &p->sq_off, (io_uring_sqe*) sqePtr, sqPolled, ioPolled, pool, asyncOperations);
+            return ConcurrentSubmissionQueue.CreateSubmissionQueue(ptr, &p->sq_off, (io_uring_sqe*) sqePtr, sqPolled, ioPolled, asyncOperations, unblockHandle);
         }
 
         private static ConcurrentCompletionQueue MapCq(int ringFd, size_t cqSize, io_uring_params* p, UnmapHandle sqHandle, bool ioPolled, out UnmapHandle cqHandle)
@@ -112,12 +112,15 @@ namespace IoUring
             _features = p.features;
 
             var (sqSize, cqSize) = GetSize(&p);
-            var pool = new AsyncOperationPool();
+
+            _operationPool = new AsyncOperationPool();
+
             var asyncOperations = new ConcurrentDictionary<ulong, AsyncOperation>();
+            var unblockHandle = new UnblockHandle(this);
 
             try
             {
-                _sq = MapSq(fd, sqSize, &p, SubmissionPollingEnabled, IoPollingEnabled, pool, asyncOperations, out _sqHandle, out _sqeHandle);
+                _sq = MapSq(fd, sqSize, &p, SubmissionPollingEnabled, IoPollingEnabled, asyncOperations, unblockHandle, out _sqHandle, out _sqeHandle);
                 _cq = MapCq(fd, cqSize, &p, _sqHandle, IoPollingEnabled, out _cqHandle);
             }
             catch (ErrnoException)
@@ -127,14 +130,14 @@ namespace IoUring
                 throw;
             }
 
+            unblockHandle.Register();
+
             var threads = new CompletionThread[completionThreads];
             var barrier = new Barrier(completionThreads);
-            var unblockEvent = new OneShotEvent(this);
-            unblockEvent.Read();
             for (int i = 0; i < threads.Length; i++)
             {
                 var isBoss = i == 0;
-                var thread = new CompletionThread(this, barrier, isBoss, isBoss ? unblockEvent : null, asyncOperations, runContinuationsAsynchronously);
+                var thread = new CompletionThread(this, barrier, isBoss, isBoss ? unblockHandle : null, asyncOperations, runContinuationsAsynchronously);
                 thread.Run();
                 threads[i] = thread;
             }
@@ -187,6 +190,9 @@ namespace IoUring
         /// Returns the number of free entries in the Submission Queue
         /// </summary>
         public int SubmissionEntriesAvailable => (int) _sq.EntriesToPrepare;
+
+        internal void Synchronize()
+            => SubmissionCompletionSynchronization.Synchronize(_ringFd.DangerousGetHandle().ToInt32(), _sq, _cq);
 
         /// <inheritdoc cref="IDisposable"/>
         public void Dispose()
